@@ -1,4 +1,4 @@
-const config = require('../galnet-news-discord-bot-config.json');
+const config = require('galnet-news-discord-bot-config.json');
 const { version, author, license } = require('./package.json');
 const fs = require('fs');
 const Discord = require('discord.js');
