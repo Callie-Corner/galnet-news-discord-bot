@@ -1,4 +1,4 @@
-const config = require('galnet-news-discord-bot-config.json');
+const config = require('./galnet-news-discord-bot-config.json');
 const { version, author, license } = require('./package.json');
 const fs = require('fs');
 const Discord = require('discord.js');
@@ -45,23 +45,24 @@ const SAVE_POSTFIX = '.guild';
 
 const IN_JSON_FORMAT = '?_format=json';
 
-const GITHUB_REPO_URL = 'https://github.com/Andrew-J-Larson/galnet-news-discord-bot';
+const GITHUB_REPO_URL = 'https://github.com/Callie-Corner/galnet-news-discord-bot';
 const BOT_NAME = 'Galnet News';
 const DEFAULT_PREFIX = 'gnn';
 const PRESENCE_NAME = `@${BOT_NAME} help | for commands`;
 const NO_PERMISSION = "Sorry, but you don't have permissions for that command.";
 const MAIN_BOT_COLOR = 0xFF9226; // LIGHTER_ORANGE = 0xFF9226; DARKER_ORANGE = 0xF07B05
 const ED_DOMAIN = 'elitedangerous.com';
+const ED_API_DOMAIN = 'zaonce.net'
 const ED_FRONTEND_URL = 'https://www.' + ED_DOMAIN + '/';
-const ED_BACKEND_URL = 'https://cms.' + ED_DOMAIN + '/';
+const ED_BACKEND_URL = 'https://cms.' + ED_API_DOMAIN + '/';
 const ED_COMMUNITY_URL = 'https://community.' + ED_DOMAIN + '/';
-const ED_NODE_URL_PREFIX = ED_BACKEND_URL + 'node/';
-const GNN_ARTICLE_URL_PREFIX = ED_FRONTEND_URL + 'news/galnet/article/';
+const ED_NODE_URL_PREFIX = ED_BACKEND_URL + 'en-US/jsonapi/node/galnet_article/';
+const GNN_ARTICLE_URL_PREFIX = ED_FRONTEND_URL + 'news/galnet/';
 const GNN_ARTICLE_IMG_URL_PREFIX = 'https://hosting.zaonce.net/elite-dangerous/galnet/';
 const GNN_ARCHIVE_URL_PREFIX = ED_COMMUNITY_URL + 'galnet/uid/';
-const GNN_RSS_URL = ED_BACKEND_URL + 'galnet.rss';
-const GNN_JSON_URL = ED_BACKEND_URL + 'api/galnet' + IN_JSON_FORMAT;
-const BOT_IMAGES_URL_PREFIX = 'https://raw.githubusercontent.com/Andrew-J-Larson/galnet-news-discord-bot/main/images/'
+const GNN_RSS_URL = 'https://proxy.gonegeeky.com/edproxy/';
+const GNN_JSON_URL = ED_BACKEND_URL + 'en-US/jsonapi/node/galnet_article?&sort=-published_at&page%5Boffset%5D=0&page%5Blimit%5D=12';
+const BOT_IMAGES_URL_PREFIX = 'https://raw.githubusercontent.com/Callie-Corner/galnet-news-discord-bot/main/images/'
 const GNN_IMAGES_URL_PREFIX = BOT_IMAGES_URL_PREFIX + 'Galnet-Logo/';
 const GNN_LOGO_ORANGE_THUMB = GNN_IMAGES_URL_PREFIX + 'Galnet_Orange_Thumbnail.png';
 const GNN_LOGO_WHITE_BOT_IMAGE = GNN_IMAGES_URL_PREFIX + 'Galnet_White_Bot_Picture.png';
@@ -524,11 +525,17 @@ function saveSettings(serverId) {
 
 // returns channel or author based on if it can send a message in current channel
 function msgLocate(msg) {
-    if (msg.guild && msg.channel.permissionsFor(msg.guild.me).has(SEND)) return msg.channel;
-    else {
-        msg.author.send("I don't have permissions to send messages from the channel which you sent the command!");
-        return msg.author;
-    };
+    if (msg?.guild && msg?.channel?.permissionsFor?.(msg.guild.me)?.has(SEND)) {
+        return msg.channel;
+    } else {
+        // only try to DM if msg and msg.author exist
+        if (msg?.author?.send) {
+            msg.author.send("I don't have permissions to send messages from the channel which you sent the command!");
+        } else {
+            console.warn("msgLocate: can't DM author — msg or author is missing.");
+        }
+        return msg?.author ?? null;
+    }
 }
 
 // set the prefix for the bot to use
@@ -578,18 +585,26 @@ function setPrefix(msg, prefix) {
 function createArticlePost(msg, post) {
     let serverId = msg ? (msg.guild ? msg.guild.id : null) : null;
     // get the right and formatted information for title and body
-    let title = (post.title.replace(/\s/g, '').length > 0) ? htmlToText(post.title, { wordwrap: null }).replace(/\r/g, '').trim() : null;
-    let body = htmlToText(post.body.replace(/\r?\n|\r/g, ''), HTML_TO_TEXT).trim();
+    let rawTitle = post.attributes?.title;
+    let title = (rawTitle?.replace(/\s/g, '').length > 0)
+        ? htmlToText(rawTitle, { wordwrap: null }).replace(/\r/g, '').trim()
+        : null;
+
+    let rawBody = post?.attributes?.body?.value ?? '';
+    let body = htmlToText(rawBody.replace(/\r?\n|\r/g, ''), HTML_TO_TEXT).trim();
     let sentences = body.split('\n');
+
     // sometimes the title is in the body
     if (!title) {
         title = sentences.shift();
         // remove the newlines before the next sentence
         while (sentences[0] == '') sentences.shift();
     }
+
     // get the first sentence and separate from others
     let firstSentence = sentences.shift();
     let moreSentences = '\n' + sentences.join('\n');
+
     // escape discord markdown symbols
     title = escapeMarkdown(title);
     firstSentence = convertToDiscord(firstSentence);
@@ -597,28 +612,46 @@ function createArticlePost(msg, post) {
 
     (async () => {
         // include the archive link (nice purpose for cases where articles have same slug article link)
-        let postNodeLink = ED_NODE_URL_PREFIX + post.nid;
-        let postNodeDataJSON = await fetch(postNodeLink + IN_JSON_FORMAT);
+        let postNodeLink = ED_NODE_URL_PREFIX + post.id;
+        let postNodeDataJSON = await fetch(postNodeLink);
         let postNodeData = await postNodeDataJSON.json();
+        // Extract GUID from JSONAPI format
+        let postAttributes = postNodeData?.data?.attributes;
         let postLangCode = 'en'; // postNodeData.langcode[0].value; <-- this never changes no matter the lang change of the article
-        let postGUID = postNodeData.field_galnet_guid[0].value;
-        // need to remove langcode from end if matched
-        if (postGUID.endsWith(postLangCode)) postGUID = postGUID.slice(0, -(postLangCode.length));
+        let postGUID = postAttributes?.field_galnet_guid ?? null;
+
+        if (!postGUID) {
+            console.warn(`Missing GUID for ${postNodeLink}`);
+            return;
+        }
+
+        if (postGUID.endsWith(postLangCode)) {
+            postGUID = postGUID.slice(0, -(postLangCode.length));
+        }
+
         let postArchiveURL = GNN_ARCHIVE_URL_PREFIX + postGUID;
+
+        let publishedAt = postAttributes?.published_at;
+        let date = new Date(publishedAt);
+        let formattedDate = date.toLocaleString('en-US', {
+            dateStyle: 'long',
+            timeStyle: 'short',
+            timeZone: 'UTC'
+        });
 
         // start creating the embed
         const embed = new Discord.MessageEmbed()
             .setColor(MAIN_BOT_COLOR)
-            .setAuthor(post.date)
+            .setAuthor(formattedDate + ' UTC')
             .setTitle('__' + title + '__')
-            .setURL(GNN_ARTICLE_URL_PREFIX + post.slug)
-            .setFooter(moment(post.date, 'DD MMM YYYY').subtract(REAL_TO_GAME_YEAR_DIFF, 'y').format('LL') + ' UTC', BOT_FOOTER_IMAGE);
+            .setURL(GNN_ARTICLE_URL_PREFIX + postAttributes.field_slug)
+            .setFooter(postAttributes?.field_galnet_date + ' UTC', BOT_FOOTER_IMAGE);
 
         // conditionally set image if there is one, else use a specific image
         let imageToCheck;
         let imageExists = true;
-        if (post.image && post.image.indexOf(',') != 0) {
-            let images = post.image.replace(/^,+/, '').split(',');
+        if (postAttributes.field_galnet_image && postAttributes.field_galnet_image.indexOf(',') != 0) {
+            let images = postAttributes.field_galnet_image.replace(/^,+/, '').split(',');
             imageToCheck = GNN_ARTICLE_IMG_URL_PREFIX + images[0] + '.png';
             // only set the image if the file is online and working
             await fetch(imageToCheck).then((response) => {
@@ -739,13 +772,18 @@ function createArticlePost(msg, post) {
 
 // fetches all the posts in order and without being empty
 async function fetchGnnArticles() {
-    let allNewsJSON = await fetch(GNN_JSON_URL);
-    // sadly need to sort all the posts first
-    let allNews = await allNewsJSON.json();
-    allNews.sort((a, b) => (new Date(b.date)) - (new Date(a.date)));
-    // then need to remove posts that have no description
-    for (let testBodyIndex = allNews.length - 1; testBodyIndex >= 0; testBodyIndex--) {
-        if (allNews[testBodyIndex].body.trim() == '') allNews.splice(testBodyIndex, 1);
+    let allNewsResponse = await fetch(GNN_JSON_URL);
+    let allNewsRaw = await allNewsResponse.json();
+
+    let allNews = allNewsRaw.data; // 👈 this is the array
+
+    // Sort the articles by date (stored in attributes.created or similar)
+    allNews.sort((a, b) => new Date(b.attributes.created) - new Date(a.attributes.created));
+
+    // Remove posts that have no description/body
+    for (let i = allNews.length - 1; i >= 0; i--) {
+        const body = allNews[i].attributes.body?.value?.trim();
+        if (!body) allNews.splice(i, 1);
     }
 
     return allNews;
